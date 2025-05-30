@@ -3,6 +3,12 @@ from streamlit_chat import message
 import google.generativeai as genai
 import base64
 from pathlib import Path
+import folium
+from streamlit_folium import folium_static
+import requests
+from geopy.geocoders import Nominatim
+import json
+from streamlit_js_eval import get_geolocation
 
 # 상수 정의
 SYSTEM_ROLE = """당신은 친근하고 편안한 영양 전문가이자 식단 컨설턴트입니다. 
@@ -13,8 +19,8 @@ SYSTEM_ROLE = """당신은 친근하고 편안한 영양 전문가이자 식단 
   • 대략적인 영양소 균형을 설명 (어떤 영양소가 부족해 보이는지 언급)
   • 부족한 영양소 보충을 위한 간단한 조언
   • 마지막에 다음 질문 중 하나를 빨간색으로 물어보기:
-    "<span style='color: red'>오늘은 어떤 음식을 드시고 싶으신가요?</span>" 또는
-    "<span style='color: red'>혹시 오늘 저녁으로 드시고 싶은 메뉴가 있으신가요?</span>"
+    "<span style='color: red'>오늘은 어떤 음식을 드시고 싶으신가요? ex) 초밥, 김밥, 샤브샤브 먹고 싶어.</span>" 또는
+    "<span style='color: red'>혹시 오늘 저녁으로 드시고 싶은 메뉴가 있으신가요? ex) 된장찌개, 김치찌개, 치킨 먹고 싶어.</span>"
 
 2단계 - 메뉴 추천:
 - 사용자가 먹고 싶은 음식들을 말하면:
@@ -27,6 +33,8 @@ SYSTEM_ROLE = """당신은 친근하고 편안한 영양 전문가이자 식단 
   • 마지막에 건강 상태와 관련된 간단한 한 줄 조언 추가
     예시) "고혈압이 있으신 경우 된장찌개는 조금 싱겁게 드시는 게 좋아요 😊"
     예시) "빈혈이 있으시니 시금치는 레몬즙을 뿌려 드시면 철분 흡수가 더 잘될 거예요 👍"
+  • 추천 메뉴를 명확하게 구분하여 응답 마지막에 "추천메뉴:"로 시작하는 새로운 줄에 메뉴 이름만 작성
+    예시) "추천메뉴: 된장찌개"
 
 주의사항:
 - 절대로 사용자가 언급하지 않은 메뉴는 추천하지 않기
@@ -217,7 +225,8 @@ def initialize_session_state():
     default_values = {
         'chat_history': [],
         'active_role': SYSTEM_ROLE,
-        'health_condition': None  # 건강 상태를 저장할 변수 추가
+        'health_condition': None,
+        'last_recommended_menu': None  # 마지막 추천 메뉴 저장
     }
     
     for key, value in default_values.items():
@@ -229,11 +238,11 @@ def initialize_gemini():
     try:
         # API 키 검증
         if 'GEMINI_API_KEY' not in st.secrets:
-            st.error("❌ API 키가 설정되지 않았습니다. .streamlit/secrets.toml 파일에 GEMINI_API_KEY를 추가해주세요.")
+            st.error("❌ Gemini API 키가 설정되지 않았습니다. .streamlit/secrets.toml 파일에 GEMINI_API_KEY를 추가해주세요.")
             return False
         
         if not st.secrets['GEMINI_API_KEY']:
-            st.error("❌ API 키가 비어 있습니다. 유효한 API 키를 입력해주세요.")
+            st.error("❌ Gemini API 키가 비어 있습니다. 유효한 API 키를 입력해주세요.")
             return False
 
         # Gemini 설정
@@ -242,6 +251,23 @@ def initialize_gemini():
 
     except Exception as e:
         st.error(f"❌ Gemini 초기화 중 오류가 발생했습니다: {str(e)}")
+        return False
+
+def initialize_google_maps():
+    """Google Maps API 키 검증"""
+    try:
+        if 'GOOGLE_MAPS_API_KEY' not in st.secrets:
+            st.error("❌ Google Maps API 키가 설정되지 않았습니다. .streamlit/secrets.toml 파일에 GOOGLE_MAPS_API_KEY를 추가해주세요.")
+            return False
+        
+        if not st.secrets['GOOGLE_MAPS_API_KEY']:
+            st.error("❌ Google Maps API 키가 비어 있습니다. 유효한 API 키를 입력해주세요.")
+            return False
+        
+        return True
+
+    except Exception as e:
+        st.error(f"❌ Google Maps API 키 검증 중 오류가 발생했습니다: {str(e)}")
         return False
 
 def get_gemini_response(messages):
@@ -295,7 +321,7 @@ def display_welcome_message():
     st.markdown("""
     <div style='background-color: #f0f2f6; padding: 20px; border-radius: 10px; border: 1px solid #e0e2e6;'>
         <h3 style='color: #1E1E1E; margin-bottom: 15px;'>👋 안녕하세요!</h3>
-        <p style='color: #2c3e50; font-size: 16px;'>먼저 아래에서 해당하는 건강 상태를 선택해주세요.</p>
+        <p style='color: #2c3e50; font-size: 16px;'>먼저 위에서 해당하는 건강 상태를 선택해주세요.</p>
         <p style='color: #2c3e50; font-size: 16px;'>그 다음 최근 드신 식사를 알려주시면 맞춤 영양 분석을 해드립니다.</p>
         <p style='color: #2c3e50; font-size: 16px;'>예시) 토스트, 김치찌개, 치킨을 먹었어.</p>
     </div>
@@ -309,6 +335,60 @@ def custom_spinner(text="답변을 생성하고 있습니다..."):
             <span style="margin-left: 10px;">{text}</span>
         </div>
     """, unsafe_allow_html=True)
+
+def find_nearby_restaurants(menu, lat, lon, api_key):
+    """주변 음식점 검색"""
+    base_url = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
+    params = {
+        'location': f'{lat},{lon}',
+        'radius': '2000',  # 2km 반경
+        'type': 'restaurant',
+        'keyword': menu,
+        'language': 'ko',
+        'key': api_key
+    }
+    
+    try:
+        response = requests.get(base_url, params=params)
+        results = response.json().get('results', [])
+        return results[:5]  # 상위 5개 결과만 반환
+    except Exception as e:
+        st.error(f"음식점 검색 중 오류가 발생했습니다: {str(e)}")
+        return []
+
+def display_map_with_restaurants(restaurants, lat, lon):
+    """음식점 위치를 지도에 표시"""
+    m = folium.Map(location=[lat, lon], zoom_start=15)
+    
+    # 현재 위치 마커
+    folium.Marker(
+        [lat, lon],
+        popup="현재 위치",
+        icon=folium.Icon(color='red', icon='info-sign')
+    ).add_to(m)
+    
+    # 음식점 마커
+    for restaurant in restaurants:
+        location = restaurant['geometry']['location']
+        name = restaurant['name']
+        rating = restaurant.get('rating', '평점 없음')
+        address = restaurant.get('vicinity', '주소 정보 없음')
+        
+        popup_html = f"""
+        <div style='width: 200px'>
+            <b>{name}</b><br>
+            평점: {rating}⭐<br>
+            주소: {address}
+        </div>
+        """
+        
+        folium.Marker(
+            [location['lat'], location['lng']],
+            popup=folium.Popup(popup_html, max_width=300),
+            icon=folium.Icon(color='green')
+        ).add_to(m)
+    
+    return m
 
 def main():
     # 페이지 설정
@@ -327,9 +407,8 @@ def main():
     # 세션 상태 초기화
     initialize_session_state()
     
-    # Gemini 초기화
-    if not initialize_gemini():
-        st.warning("채팅 기능이 비활성화되었습니다. API 키를 확인해주세요.")
+    # API 초기화
+    if not initialize_gemini() or not initialize_google_maps():
         st.stop()
 
     # 메인 타이틀
@@ -362,8 +441,59 @@ def main():
     chat_container = st.container()
     with chat_container:
         display_chat_history()
+        
+        # AI 응답에서 추천 메뉴 추출
+        if st.session_state['chat_history'] and not st.session_state['chat_history'][-1]['is_user']:
+            last_message = st.session_state['chat_history'][-1]['content']
+            if "추천메뉴:" in last_message:
+                recommended_menu = last_message.split("추천메뉴:")[-1].strip()
+                st.session_state['last_recommended_menu'] = recommended_menu
     
-    # 사용자 입력 처리 (건강 상태가 선택된 경우에만 활성화)
+    # 주변 음식점 검색 (추천 메뉴가 있는 경우)
+    if st.session_state.get('last_recommended_menu'):
+        st.subheader("🍽️ 추천 메뉴를 판매하는 주변 음식점")
+        
+        # 위치 정보 가져오기
+        loc = get_geolocation()
+        
+        if loc:
+            try:
+                lat = loc['coords']['latitude']
+                lon = loc['coords']['longitude']
+                
+                # 현재 위치의 주소 정보 가져오기
+                geolocator = Nominatim(user_agent="my_health_fit_eat")
+                location = geolocator.reverse((lat, lon))
+                if location:
+                    st.success(f"📍 현재 위치: {location.address}")
+                
+                # 주변 음식점 검색
+                restaurants = find_nearby_restaurants(
+                    st.session_state['last_recommended_menu'],
+                    lat,
+                    lon,
+                    st.secrets['GOOGLE_MAPS_API_KEY']  # secrets.toml에서 API 키 사용
+                )
+                
+                if restaurants:
+                    # 지도 표시
+                    m = display_map_with_restaurants(restaurants, lat, lon)
+                    folium_static(m)
+                    
+                    # 음식점 목록 표시
+                    st.subheader("📍 검색된 음식점 목록")
+                    for restaurant in restaurants:
+                        with st.expander(f"🏪 {restaurant['name']}"):
+                            st.write(f"⭐ 평점: {restaurant.get('rating', '평점 없음')}")
+                            st.write(f"📍 주소: {restaurant.get('vicinity', '주소 정보 없음')}")
+                else:
+                    st.info(f"주변에서 {st.session_state['last_recommended_menu']}를 판매하는 음식점을 찾지 못했습니다.")
+            except Exception as e:
+                st.error(f"위치 정보 처리 중 오류가 발생했습니다: {str(e)}")
+        else:
+            st.warning("위치 정보를 가져올 수 없습니다. 브라우저의 위치 정보 접근을 허용해주세요.")
+    
+    # 사용자 입력 처리
     if st.session_state['health_condition']:
         user_input = st.chat_input("메시지를 입력하세요")
         if user_input:
