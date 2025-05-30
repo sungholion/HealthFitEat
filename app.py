@@ -411,13 +411,36 @@ def main():
     if not initialize_gemini() or not initialize_google_maps():
         st.stop()
 
+    # 위치 정보 초기화
+    if 'user_location' not in st.session_state:
+        loc = get_geolocation()
+        if loc:
+            try:
+                lat = loc['coords']['latitude']
+                lon = loc['coords']['longitude']
+                geolocator = Nominatim(user_agent="my_health_fit_eat")
+                location = geolocator.reverse((lat, lon))
+                st.session_state['user_location'] = {
+                    'lat': lat,
+                    'lon': lon,
+                    'address': location.address if location else None
+                }
+            except Exception as e:
+                st.warning("위치 정보를 가져오는 중 오류가 발생했습니다. 브라우저의 위치 정보 접근을 허용해주세요.")
+        else:
+            st.warning("더 나은 서비스를 위해 브라우저의 위치 정보 접근을 허용해주세요.")
+
     # 메인 타이틀
     st.title(f"{PAGE_ICON} {PAGE_TITLE}")
+    
+    # 현재 위치 표시 (위치 정보가 있는 경우)
+    if 'user_location' in st.session_state and st.session_state['user_location'].get('address'):
+        st.success(f"📍 현재 위치: {st.session_state['user_location']['address']}")
     
     # 새로운 대화 시작 버튼
     if st.button("새로운 대화 시작"):
         st.session_state['chat_history'] = []
-        st.session_state['health_condition'] = None  # 건강 상태도 초기화
+        st.session_state['health_condition'] = None
         st.rerun()
     
     # 건강 상태 선택
@@ -453,26 +476,17 @@ def main():
     if st.session_state.get('last_recommended_menu'):
         st.subheader("🍽️ 추천 메뉴를 판매하는 주변 음식점")
         
-        # 위치 정보 가져오기
-        loc = get_geolocation()
-        
-        if loc:
+        if 'user_location' in st.session_state and st.session_state['user_location'].get('lat'):
             try:
-                lat = loc['coords']['latitude']
-                lon = loc['coords']['longitude']
-                
-                # 현재 위치의 주소 정보 가져오기
-                geolocator = Nominatim(user_agent="my_health_fit_eat")
-                location = geolocator.reverse((lat, lon))
-                if location:
-                    st.success(f"📍 현재 위치: {location.address}")
+                lat = st.session_state['user_location']['lat']
+                lon = st.session_state['user_location']['lon']
                 
                 # 주변 음식점 검색
                 restaurants = find_nearby_restaurants(
                     st.session_state['last_recommended_menu'],
                     lat,
                     lon,
-                    st.secrets['GOOGLE_MAPS_API_KEY']  # secrets.toml에서 API 키 사용
+                    st.secrets['GOOGLE_MAPS_API_KEY']
                 )
                 
                 if restaurants:
@@ -489,7 +503,7 @@ def main():
                 else:
                     st.info(f"주변에서 {st.session_state['last_recommended_menu']}를 판매하는 음식점을 찾지 못했습니다.")
             except Exception as e:
-                st.error(f"위치 정보 처리 중 오류가 발생했습니다: {str(e)}")
+                st.error(f"음식점 검색 중 오류가 발생했습니다: {str(e)}")
         else:
             st.warning("위치 정보를 가져올 수 없습니다. 브라우저의 위치 정보 접근을 허용해주세요.")
     
