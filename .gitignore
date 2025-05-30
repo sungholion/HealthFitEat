@@ -28,7 +28,7 @@ venv/
 ENV/
 
 # Streamlit secrets
-.streamlit/secrets.toml
+.secrets.toml
 
 # IDE
 .idea/
