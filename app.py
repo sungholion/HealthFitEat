@@ -319,7 +319,7 @@ def main():
     )
     
     # 배경 이미지 설정
-    set_background('assets/bg_pig.png')
+    set_background('bg_pig.png')
     
     # 페이지 스타일 설정
     setup_page_style()
